@@ -309,7 +309,7 @@ class ItemDisplayer(object):
         result = sym.value()(item)
         return 'value = ' + str(result)
         
-class ExpressionTraverser(gdb.Command, TreeWalker, ItemUtility):
+class ExpressionTraverser(gdb.Command, TreeWalker, ItemDisplayer):
     """print mysql expression (Item) tree"""
 
     def __init__ (self):
@@ -442,7 +442,7 @@ class TABLE_LIST_traverser(gdb.Command):
 
 TABLE_LIST_traverser()
 
-class SEL_TREE_traverser(gdb.Command, TreeWalker, ItemUtility):
+class SEL_TREE_traverser(gdb.Command, TreeWalker, ItemDisplayer):
     NO_MIN_RANGE = 1
     NO_MAX_RANGE = 2
     NEAR_MIN = 4
