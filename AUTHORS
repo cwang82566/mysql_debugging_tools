@@ -1,0 +1,4 @@
+The basic project is initialized by Wang Diancheng
+"mysql exprtree/qbtree" is written by Wang Diancheng, improved by Wang Chen to support more data types and 8.0.22+ version
+"mysql qbdump" is written by Li bo, improved by Wang Diancheng
+"mysql tl/sel_tree/join_tree" is written by Wang Chen
