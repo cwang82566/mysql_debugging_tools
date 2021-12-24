@@ -6,3 +6,4 @@ This tools include:
 4. Table List : mysql tl <table_list>
 5. Thread overview : thread overview
 6. Thread search : thread search <search_key>
+7. Print Join List: mysql join_tree <join_list>
