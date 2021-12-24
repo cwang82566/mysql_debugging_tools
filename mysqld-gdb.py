@@ -1,7 +1,9 @@
 from __future__ import print_function # python2.X support
 import re
 
-# some utilities
+#
+# Some utility functions
+#
 def std_vector_to_list(std_vector):
     """convert std::vector to list of python"""
     out_list = []
@@ -39,6 +41,23 @@ def std_deque_to_list(std_deque):
 
     return out_list
 
+def mem_root_deque_to_list(deque):
+    """convert mem_root_deque to list of python"""
+    out_list = []
+    elttype = deque.type.template_argument(0)
+    elements = deque['block_elements']
+    start = deque['m_begin_idx']
+    end = deque['m_end_idx']
+    blocks = deque['m_blocks']
+
+    p = start
+    while p != end:
+        elt = blocks[p / elements]['elements'][p % elements]
+        out_list.append(elt)
+        p += 1
+
+    return out_list
+
 def gdb_set_convenience_variable(var_name, var):
     """set convenience variable in python script is supported by gdb 8.0
 or above, this for lower gdb version support
@@ -49,6 +68,9 @@ or above, this for lower gdb version support
 def get_convenince_name():
     return ''
 
+#
+# Global variables or version related functions definations
+#
 if hasattr(gdb, 'set_convenience_variable'):
     convenience_name_firstchar = 'a'
     convenience_name_sequence = [convenience_name_firstchar]
@@ -79,9 +101,24 @@ if hasattr(gdb, 'set_convenience_variable'):
         return generate_convenince_name()
 
 #
-# threads overview/search for mysql
+# Some convenience variables for easy debug because they are macros
+#
+gdb_set_convenience_variable('MAX_TABLES', gdb.parse_and_eval('sizeof(unsigned long long) * 8 - 3'))
+gdb_set_convenience_variable('INNER_TABLE_BIT', gdb.parse_and_eval('((unsigned long long)1) << ($MAX_TABLES + 0)'))
+gdb_set_convenience_variable('OUTER_REF_TABLE_BIT', gdb.parse_and_eval('((unsigned long long)1) << ($MAX_TABLES + 1)'))
+gdb_set_convenience_variable('RAND_TABLE_BIT', gdb.parse_and_eval('((unsigned long long)1) << ($MAX_TABLES + 2)'))
+gdb_set_convenience_variable('PSEUDO_TABLE_BITS', gdb.parse_and_eval('($INNER_TABLE_BIT | $OUTER_REF_TABLE_BIT | $RAND_TABLE_BIT)'))
+
+# Define a mysql command prefix for all mysql related command
+gdb.Command('mysql', gdb.COMMAND_DATA, prefix=True)
+
+#
+# Commands start here
 #
 
+#
+# threads overview/search for mysql
+#
 def gdb_threads():
     if hasattr(gdb, 'selected_inferior'):
         threads = gdb.selected_inferior().threads()
@@ -192,16 +229,6 @@ class ThreadOverview(gdb.Command):
 
 ThreadOverview()
 
-
-#
-# Some convenience variables for easy debug because they are macros
-#
-gdb_set_convenience_variable('MAX_TABLES', gdb.parse_and_eval('sizeof(uint64_t) * 8 - 3'))
-gdb_set_convenience_variable('INNER_TABLE_BIT', gdb.parse_and_eval('((uint64_t)1) << ($MAX_TABLES + 0)'))
-gdb_set_convenience_variable('OUTER_REF_TABLE_BIT', gdb.parse_and_eval('((uint64_t)1) << ($MAX_TABLES + 1)'))
-gdb_set_convenience_variable('RAND_TABLE_BIT', gdb.parse_and_eval('((uint64_t)1) << ($MAX_TABLES + 2)'))
-gdb_set_convenience_variable('PSEUDO_TABLE_BITS', gdb.parse_and_eval('($INNER_TABLE_BIT | $OUTER_REF_TABLE_BIT | $RAND_TABLE_BIT)'))
-
 class TreeWalker(object):
     """A base class for tree traverse"""
 
@@ -219,10 +246,24 @@ class TreeWalker(object):
     def walk(self, expr):
         self.reset()
         self.do_walk(expr, 0)
-        
+
     def do_walk(self, expr, level):
-        expr_typed = expr.dynamic_type
-        expr_casted = expr.cast(expr_typed)
+        item_show_info = ''
+        expr_typed = None
+        expr_nodetype = None
+        if not isinstance(expr, str):
+            expr_typed = expr.dynamic_type
+            expr_casted = expr.cast(expr_typed)
+            try:
+                expr_nodetype = expr.type.template_argument(0)
+                if expr_nodetype.code != gdb.TYPE_CODE_PTR:
+                    expr_nodetype = expr.type.template_argument(0).pointer()
+            except (gdb.error, RuntimeError):
+                expr_nodetype = None
+                pass
+        else:
+            item_show_info = str
+
         self.current_level = level
         level_graph = '  '.join(self.level_graph[:level])
         for i, c in enumerate(self.level_graph):
@@ -231,33 +272,37 @@ class TreeWalker(object):
         cname = self.cname_prefix + str(self.var_index)
         left_margin = "{}${}".format('' if level == 0 else '--', cname)
         self.var_index += 1
-        item_show_info = ''
-        show_func = self.get_show_func(expr_typed.target())
-        if show_func is not None:
-            item_show_info = show_func(expr_casted)
+        if not isinstance(expr, str):
+            show_func = self.get_show_func(expr_typed, expr_nodetype)
+            if show_func is not None:
+                item_show_info = show_func(expr_casted)
+
         if item_show_info is not None:
             print("{}{} ({}) {} {}".format(
                   level_graph, left_margin, expr_typed, expr, item_show_info))
-        gdb_set_convenience_variable(cname, expr_casted)
-        walk_func = self.get_walk_func(expr_typed.target())
-        if walk_func is None:
-            return
-        children = walk_func(expr_casted)
-        if not children:
-            return
-        if len(self.level_graph) < level + 1:
-            self.level_graph.append('|')
-        else:
-            self.level_graph[level] = '|'
-        for i, child in enumerate(children):
-            if i == len(children) - 1:
-                self.level_graph[level] = '`'
-            self.do_walk(child, level + 1)
+
+        if not isinstance(expr, str):
+            gdb_set_convenience_variable(cname, expr_casted)
+            walk_func = self.get_walk_func(expr_typed, expr_nodetype)
+            if walk_func is None:
+                return
+            children = walk_func(expr_casted)
+            if not children:
+                return
+
+            if len(self.level_graph) < level + 1:
+                self.level_graph.append('|')
+            else:
+                self.level_graph[level] = '|'
+
+            for i, child in enumerate(children):
+                if i == len(children) - 1:
+                    self.level_graph[level] = '`'
+                self.do_walk(child, level + 1)
 
     def get_action_func(self, item_type, action_prefix):
         def type_name(typ):
-            return typ.name if hasattr(typ, 'name') else str(typ)
-
+            return typ.name if typ.name != None and hasattr(typ, 'name') else str(typ)
         func_name = action_prefix + type_name(item_type)
         if hasattr(self, func_name):
             return getattr(self, func_name)
@@ -272,20 +317,47 @@ class TreeWalker(object):
                 return getattr(self, func_name)
 
             return self.get_action_func(typ, action_prefix)
-
         return None
 
-    def get_walk_func(self, item_type):
-        return self.get_action_func(item_type, 'walk_')
+    def get_walk_func(self, item_type, item_type_templ):
+        if item_type_templ != None:
+            return self.get_action_func(item_type_templ.target(), 'walk_templ_')
+        else:
+            return self.get_action_func(item_type.target(), 'walk_')
 
-    def get_show_func(self, item_type):
-        return self.get_action_func(item_type, 'show_')
-
-# Define a mysql command prefix for all mysql related command
-gdb.Command('mysql', gdb.COMMAND_DATA, prefix=True)
+    def get_show_func(self, item_type, item_type_templ):
+        if item_type_templ != None:
+            return self.get_action_func(item_type_templ.target(), 'show_templ_')
+        else:
+            return self.get_action_func(item_type.target(), 'show_')
 
 class ItemDisplayer(object):
     """mysql item basic show functions"""
+
+    def get_show_func(self, item_type, item_type_templ):
+        if item_type_templ != None:
+            return self.get_action_func(item_type_templ.target(), 'show_templ_')
+        else:
+            return self.get_action_func(item_type.target(), 'show_')
+
+    def show_item_info(self, item):
+        expr_typed = item.dynamic_type
+        expr_casted = item.cast(expr_typed)
+        expr_nodetype = None
+        try:
+            expr_nodetype = item.type.template_argument(0)
+            if expr_nodetype.code != gdb.TYPE_CODE_PTR:
+                expr_nodetype = item.type.template_argument(0).pointer()
+        except (gdb.error, RuntimeError):
+            expr_nodetype = None
+            pass
+        show_func = self.get_show_func(expr_typed, expr_nodetype)
+        if show_func is not None:
+            item_show_info = show_func(expr_casted)
+        if item_show_info == None:
+            return ''
+        return item_show_info
+
     def show_Item_ident(self, item):
         db_cata = []
         if item['db_name']:
@@ -308,7 +380,43 @@ class ItemDisplayer(object):
         sym = gdb.lookup_global_symbol('Item_decimal::val_real()')
         result = sym.value()(item)
         return 'value = ' + str(result)
-        
+
+    def show_uchar(self, item):
+        return item
+
+    def show_Field(self, item):
+        db_cata = []
+        if item['table_name']:
+            db_cata.append(item['table_name'].dereference().string())
+        if item['field_name']:
+            db_cata.append(item['field_name'].string())
+        return 'field = ' + '.'.join(db_cata)
+
+    def show_TABLE_LIST(self, val):
+        alias = val['alias']
+        db = val['db']
+        join_cond = val['m_join_cond'] if val['m_join_cond'] != None else ''
+        outer_cond = val['outer_join'] if val['outer_join'] != None else ''
+        return '{}.{}'.format(db.string(), alias.string())
+
+    def show_SARGABLE_PARAM(self, item):
+        ''' {field = 0x7ff39d6efa58, arg_value = 0x7ff39e6af698, num_values = 1} '''
+        info = 'field = ' + self.show_Field(item['field'])
+        info += ', arg_value = \'' + self.show_item_info(item['arg_value'].dereference()) + '\''
+        info += ', num_values = ' + str(item['num_values'])
+        return info
+
+    def show_Key_use(self, item):
+        info = 'key = ' + str(item['key'])
+        info += ', keypart = ' + str(item['keypart'])
+        info += ', val = \'' + self.show_item_info(item['val']) + '\''
+        info += ', null_rejecting = ' + str(item['null_rejecting'])
+        info += ', used_tables = ' + str(item['used_tables'])
+        info += ', table_ref = ' + self.show_TABLE_LIST(item['table_ref'])
+        info += ', fanout = ' + str(item['fanout'])
+        info += ', read_cost = ' + str(item['read_cost'])
+        return info
+
 class ExpressionTraverser(gdb.Command, TreeWalker, ItemDisplayer):
     """print mysql expression (Item) tree"""
 
@@ -340,6 +448,19 @@ class ExpressionTraverser(gdb.Command, TreeWalker, ItemDisplayer):
         nodetype = item_list.type.template_argument(0)
         cur_elt = item_list['first']
         children = []
+        while cur_elt != end_of_list:
+            info = cur_elt.dereference()['info']
+            children.append(info.cast(nodetype.pointer()))
+            cur_elt = cur_elt.dereference()['next']
+        return children
+
+    def walk_Item_equal(self, val):
+        end_of_list = gdb.parse_and_eval('end_of_list').address
+        item_list = val['fields']
+        nodetype = item_list.type.template_argument(0)
+        cur_elt = item_list['first']
+        children = []
+        children.append(val['const_item'])
         while cur_elt != end_of_list:
             info = cur_elt.dereference()['info']
             children.append(info.cast(nodetype.pointer()))
@@ -387,6 +508,20 @@ def print_SELECT_LEX_UNIT(select_lex_unit):
         pass
     return ''
 
+# For 8.0.25+
+def print_Query_block(query_block):
+    """print Query_block extra information"""
+
+    leaf_tables = query_block['leaf_tables']
+    return print_TABLE_LIST(leaf_tables)
+
+def print_Query_expression(unit):
+    try:
+        return str("")
+    except gdb.error:
+        pass
+    return ''
+
 class QueryBlockTraverser(gdb.Command, TreeWalker):
     """print mysql query block tree"""
     def __init__ (self):
@@ -394,7 +529,7 @@ class QueryBlockTraverser(gdb.Command, TreeWalker):
 
     def invoke(self, arg, from_tty):
         if not arg:
-            print("usage: mysql qbtree [SELECT_LEX_UNIT/SELECT_LEX]")
+            print("usage: mysql qbtree [SELECT_LEX_UNIT/SELECT_LEX/Query_expression/Query_block]")
             return
         qb = gdb.parse_and_eval(arg)
         self.start_qb = qb.dereference()
@@ -416,6 +551,8 @@ class QueryBlockTraverser(gdb.Command, TreeWalker):
     
     walk_SELECT_LEX = do_walk_query_block
     walk_SELECT_LEX_UNIT = do_walk_query_block
+    walk_Query_expression = do_walk_query_block
+    walk_Query_block = do_walk_query_block
 
     def get_current_marker(self, val):
         if self.start_qb.address != val:
@@ -428,6 +565,11 @@ class QueryBlockTraverser(gdb.Command, TreeWalker):
     def show_SELECT_LEX_UNIT(self, val):
         return print_SELECT_LEX_UNIT(val) + self.get_current_marker(val)
 
+    def show_Query_expression(self, val):
+        return print_Query_expression(val) + self.get_current_marker(val)
+
+    def show_Query_block(self, val):
+        return print_Query_block(val) + self.get_current_marker(val)
 
 QueryBlockTraverser()
 
@@ -494,7 +636,6 @@ class SEL_TREE_traverser(gdb.Command, TreeWalker, ItemDisplayer):
         sel_arg_field = val['field']
         if not sel_arg_field:
              return None
-
         level_graph = '  '.join(self.level_graph[:self.current_level])
         for i, c in enumerate(self.level_graph):
             if c == '`':
@@ -507,8 +648,8 @@ class SEL_TREE_traverser(gdb.Command, TreeWalker, ItemDisplayer):
             self.level_graph[self.current_level] = '|'
 
         field_show_info = ''
-        if val['field_item']:
-            field_show_info = self.get_item_show_info(val['field_item'])
+        if val['field']:
+            field_show_info = self.get_item_show_info(val['field'])
             field_show_info = "{}{} field = {}".format(level_graph, left_margin,
                                     field_show_info)
         
@@ -517,33 +658,55 @@ class SEL_TREE_traverser(gdb.Command, TreeWalker, ItemDisplayer):
         left_parenthese = '['
         right_parenthese = ']'
         min_item_show_info = ''
-        if val['min_item'] and self.NO_MIN_RANGE & sel_root_min_flag == 0:
+        max_item_show_info = ''
+        min_value = val['min_value']
+        max_value = val['max_value']
+        min_item = None
+        max_item = None
+        try:
+            min_item = val['min_item']
+            max_item = val['max_item']
+        except (gdb.error, RuntimeError):
+            min_item = None
+            max_item = None
+
+        if min_item and self.NO_MIN_RANGE & sel_root_min_flag == 0:
             min_item_show_info = self.get_item_show_info(val['min_item'])
             if self.NEAR_MIN & sel_root_min_flag > 0:
                 left_parenthese = "("
         else:
-            min_item_show_info = " -infinity"
-            left_parenthese = "("
+            if min_item:
+                min_item_show_info = " -infinity"
+                left_parenthese = "("
+            else:
+                min_item_show_info = self.get_item_show_info(val['min_value'])
+                if self.NEAR_MIN & sel_root_min_flag > 0:
+                    left_parenthese = "("
 
         max_item_show_info = ''
-        if val['max_item'] and self.NO_MAX_RANGE & sel_root_max_flag == 0:
+        if max_item and self.NO_MAX_RANGE & sel_root_max_flag == 0:
             max_item_show_info = self.get_item_show_info(val['max_item'])
             if self.NEAR_MAX & sel_root_max_flag > 0:
                 right_parenthese = ")"
         else:
-            max_item_show_info = " +infinity"
-            right_parenthese = ")"
+            if max_item:
+                max_item_show_info = " +infinity"
+                right_parenthese = ")"
+            else:
+                max_item_show_info = self.get_item_show_info(val['max_value'])
+                if self.NEAR_MAX & sel_root_max_flag > 0:
+                    right_parenthese = ")"
 
         item_show_info = ''
-        if sel_root_max_flag == 0 and sel_root_min_flag == 0 and val['max_item'] == val['min_item']:
+        if sel_root_max_flag == 0 and sel_root_min_flag == 0 and min_value == max_value:
             item_show_info = "{}{} equal = {}{} {}".format(level_graph, left_margin, left_parenthese, min_item_show_info,
-                                                      right_parenthese)
+                                                           right_parenthese)
         else:
             item_show_info = "{}{} scope = {}{},{} {}".format(level_graph, left_margin, left_parenthese, min_item_show_info,
-                                                      max_item_show_info, right_parenthese)
-        return "[color={}, is_asc={}, minflag={}, maxflag={}, part={}, selectivity={}]\n{}\n{}".format(
+                                                              max_item_show_info, right_parenthese)
+        return "[color={}, is_asc={}, minflag={}, maxflag={}, part={}]\n{}\n{}".format(
                      val['color'], val['is_ascending'], sel_root_min_flag,
-                     sel_root_max_flag, val['part'], val['selectivity'], field_show_info, item_show_info)
+                     sel_root_max_flag, val['part'], field_show_info, item_show_info)
 
     def get_item_show_info(self, expr):
         item_show_info = ''
@@ -553,7 +716,7 @@ class SEL_TREE_traverser(gdb.Command, TreeWalker, ItemDisplayer):
         expr_casted = expr.cast(expr_typed)
         item_show_info = " ${} ({}) {}".format(
                          cname, expr_typed, expr)
-        show_func = self.get_show_func(expr_typed.target())
+        show_func = self.get_show_func(expr_typed, None)
         if show_func is not None:
              item_show_info = "{} {}".format(item_show_info, show_func(expr_casted))
         return item_show_info
@@ -580,6 +743,105 @@ class SEL_TREE_traverser(gdb.Command, TreeWalker, ItemDisplayer):
         return out_list
 
 SEL_TREE_traverser()
+
+class JOIN_LIST_traverser(gdb.Command, TreeWalker, ItemDisplayer):
+    """print join list TREE"""
+    def __init__ (self):
+        super (self.__class__, self).__init__("mysql join_tree", gdb.COMMAND_OBSCURE)
+
+    def invoke(self, arg, from_tty):
+        if not arg:
+            print("usage: mysql join_tree [join_list]")
+            return
+        join_list = gdb.parse_and_eval(arg)
+        if join_list:
+            self.walk(join_list)
+
+    def walk_templ_TABLE_LIST(self, val):
+        expr_typed = val.dynamic_type
+        if (str(expr_typed) == 'memroot_deque<TABLE_LIST*>'):
+            return std_deque_to_list(val)
+        elif (str(expr_typed) == 'mem_root_deque<TABLE_LIST*>'):
+            return mem_root_deque_to_list(val)
+
+        nodetype = val.type.template_argument(0)
+        cur_elt = val['first']
+        end_of_list = gdb.parse_and_eval('end_of_list').address
+        children = []
+        while cur_elt != end_of_list:
+            info = cur_elt.dereference()['info']
+            nodeinfo = info.cast(nodetype.pointer())
+            children.append(nodeinfo)
+            cur_elt = cur_elt.dereference()['next']
+        return children
+
+    def walk_TABLE_LIST(self, val):
+        alias = val['alias']
+        children = []
+        if alias != None and (gdb.Value(alias).string() == '(nest_last_join)' or gdb.Value(alias).string() == '(nested_join)' or 
+            gdb.Value(alias).string() == '(sj-nest)'):
+            nested_join = val['nested_join'].dereference()
+            children.append(nested_join['join_list']) 
+        return children
+
+    def walk_NESTED_JOIN(self, val):
+        join_list = val['join_list']
+        children = []
+        children.append(join_list)
+        return children
+
+    def show_JOIN(self, val):
+        table_count = val['query_block']['leaf_table_count']
+        sj_nests = val['query_block']['sj_nests']
+        funcname = "(uint) (*("+str(sj_nests.type)+"*)("+str(sj_nests.address)+")).size()"
+        sj_nests_count = gdb.parse_and_eval(funcname);
+        win_count = 0
+        if val['m_windows'] != None:
+            win_count = val['m_windows']['elements']
+        best_ref_count = table_count + sj_nests_count + 2 + win_count
+        return 'tables={}, table_count={}, const_tables={}, primary_tables={}, tmp_tables={}, c_sj_nests={}, c_best_ref={}'.format(
+            val['tables'], table_count, val['const_tables'], val['primary_tables'], val['tmp_tables'], sj_nests_count, best_ref_count)
+
+    def walk_JOIN(self, val):
+        join_tab = val['join_tab']
+        expr_typed = join_tab.dynamic_type
+        children = []
+        i = 0
+        table_count = val['query_block']['leaf_table_count']
+        children.append("-------join_tab array---------")
+        while i != table_count:
+            children.append(join_tab[i].address)
+            i = i+1
+        children.append("-------best_ref array---------")
+        sj_nests = val['query_block']['sj_nests']
+        funcname = "(uint) (*("+str(sj_nests.type)+"*)("+str(sj_nests.address)+")).size()"
+        sj_nests_count = gdb.parse_and_eval(funcname);
+        win_count = 0
+        if val['m_windows'] != None:
+            win_count = val['m_windows']['elements']
+        best_ref_count = table_count + sj_nests_count + 2 + win_count
+        best_ref = val['best_ref']
+        i = 0
+        while i != best_ref_count:
+            children.append(best_ref[i])
+            i = i+1
+        children.append(val['keyuse_array'].address)
+        return children
+
+    def show_Key_use_array(self, val):
+        return "size={}".format(val['m_size'])
+
+    def walk_Key_use_array(self, val):
+        elements = val['m_array']
+        children = []
+        for i in range(val['m_size']):
+            children.append(elements+i)
+        return children
+
+    def show_JOIN_TAB(self, val):
+        return 'table_name={},found_records={},read_time={},dependent={},use_quick={},const_keys={}, skip_scan_keys={}, quick_order_tested={}'.format(val['table_ref']['alias'], val['found_records'], val['read_time'], val['dependent'], val['use_quick'], val['const_keys']['map'], val['skip_scan_keys']['map'], val['quick_order_tested']['map'])
+
+JOIN_LIST_traverser()
 #
 # pretty printers
 #
@@ -620,10 +882,11 @@ class ListPrinter(object):
                 raise StopIteration
             elt = self.base.dereference()
             self.base = elt['next']
-            count = self.count
+            cname = '%s%d' % (self.convenience_name_prefix, self.count)
+            val = get_value_from_list_node(self.nodetype, elt, self.convenience_name_prefix, self.count)
             self.count = self.count + 1
-            val = get_value_from_list_node(self.nodetype, elt, self.convenience_name_prefix, count)
-            return ('%s[%d]' % (self.convenience_name_prefix, count), '(%s) %s' % (val.type, val))
+            gdb_set_convenience_variable(cname, elt)
+            return ('$%s' % (cname), '(%s) %s' % (val.type, val))
 
     def __init__(self, val):
         self.typename = val.type
@@ -636,11 +899,143 @@ class ListPrinter(object):
     def to_string(self):
         return '%s' % self.typename if self.val['elements'] != 0 else 'empty %s' % self.typename
 
+def get_value_from_deque_node(nodetype, node, conname_prefix, index):
+    """Returns the value held in an list_node<_Val>"""
+
+    val = node['info'].cast(nodetype.pointer())
+    val = val.cast(val.dynamic_type)
+
+    conven_name = '%s%d' % (conname_prefix, index)
+    gdb_set_convenience_variable(conven_name, val)
+
+    return val
+
+class memroot_dequePrinter(object):
+    """Print a MySQL memroot_deque List"""
+
+    class _iterator(PrinterIterator):
+        def __init__(self, nodetype, head):
+            self.nodetype = nodetype
+            self.base = head['_M_impl']['_M_start']['_M_cur']
+            self.end = head['_M_impl']['_M_start']['_M_last']
+            self.node = head['_M_impl']['_M_start']['_M_node']
+            self.last= head['_M_impl']['_M_finish']['_M_cur']
+            self.count = 0
+            self.convenience_name_prefix = get_convenince_name()
+            self.buffer_size = 1
+            if nodetype.sizeof < 512:
+                self.buffer_size = int (512 / nodetype.sizeof)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.base == self.last:
+                raise StopIteration
+            elt = self.base.dereference()
+            cname = '%s%d' % (self.convenience_name_prefix, self.count)
+            self.count = self.count + 1
+            self.base = self.base + 1
+            if self.base == self.end: 
+                self.node = self.node + 1
+                self.base = self.node[0]
+                self.end = self.base + self.buffer_size 
+            gdb_set_convenience_variable(cname, elt)
+            return ('$%s' % (cname), '(%s) %s' % (elt.type, elt))
+
+    def __init__(self, val):
+        self.typename = val.type
+        self.val = val
+
+    def children(self):
+        nodetype = self.typename.template_argument(0)
+        return self._iterator(nodetype, self.val)
+
+    def to_string(self):
+        return '%s' % self.typename
+
+# mem_root_deque is from 8.0.22+
+class mem_root_dequePrinter(object):
+    """Print a MySQL mem_root_deque List"""
+
+    class _iterator(PrinterIterator):
+        def __init__(self, nodetype, head):
+            self.nodetype = nodetype
+            self.base = head['m_begin_idx']
+            self.end = head['m_end_idx']
+            self.elements = head['block_elements']
+            self.blocks = head['m_blocks']
+            self.count = 0
+            self.convenience_name_prefix = get_convenince_name()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.base == self.end:
+                raise StopIteration
+            elt = self.blocks[self.base / self.elements]['elements'][self.base % self.elements]
+            cname = '%s%d' % (self.convenience_name_prefix, self.count)
+            self.count = self.count + 1
+            self.base = self.base + 1
+            gdb_set_convenience_variable(cname, elt)
+            return ('$%s' % (cname), '(%s) %s' % (elt.type, elt))
+
+    def __init__(self, val):
+        self.typename = val.type
+        self.val = val
+
+    def children(self):
+        nodetype = self.typename.template_argument(0)
+        return self._iterator(nodetype, self.val)
+
+    def to_string(self):
+        return '%s' % self.typename
+
+class Mem_root_arrayPrinter(object):
+    """Print a MySQL Mem_root_array List"""
+
+    class _iterator(PrinterIterator):
+        def __init__(self, nodetype, head):
+            self.nodetype = nodetype
+            self.elements = head['m_array']
+            self.end = head['m_size']
+            self.count = 0
+            self.base = 0
+            self.convenience_name_prefix = get_convenince_name()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.base == self.end:
+                raise StopIteration
+            elt = self.elements[self.base]
+            cname = '%s%d' % (self.convenience_name_prefix, self.count)
+            self.count = self.count + 1
+            self.base = self.base + 1
+            gdb_set_convenience_variable(cname, elt)
+            return ('$%s' % (cname), '(%s) %s' % (elt.type, elt))
+
+    def __init__(self, val):
+        self.typename = val.type
+        self.val = val
+
+    def children(self):
+        nodetype = self.typename.template_argument(0)
+        return self._iterator(nodetype, self.val)
+
+    def to_string(self):
+        return '%s' % self.typename
+
 import gdb.printing
 def build_pretty_printer():
     pp = gdb.printing.RegexpCollectionPrettyPrinter(
         "mysqld")
     pp.add_printer('List', '^List<.*>$', ListPrinter)
+    pp.add_printer('memroot_deque', '^memroot_deque<.*>$', memroot_dequePrinter)
+    pp.add_printer('mem_root_deque', '^mem_root_deque<.*>$', mem_root_dequePrinter)
+    pp.add_printer('Mem_root_array', '^Mem_root_array<.*>$', Mem_root_arrayPrinter)
     return pp
 
 gdb.printing.register_pretty_printer(
